@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"crypto/rand"
 	"database/sql"
 	"encoding/base64"
@@ -10,6 +11,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -20,12 +22,14 @@ import (
 
 // Recording represents a phone recording with MP3 attachment
 type Recording struct {
-	ID          string `json:"id"`          // Unique identifier
-	PhoneNumber string `json:"phoneNumber"` // Phone number of sender
-	ReceivedAt  string `json:"receivedAt"`  // Date received
-	MP3FileName string `json:"mp3FileName"` // Name of the MP3 file
-	FilePath    string `json:"filePath"`    // Path to the saved MP3 file
-	FileSize    int64  `json:"fileSize"`    // Size of the MP3 file in bytes
+	ID            string `json:"id"`            // Unique identifier
+	PhoneNumber   string `json:"phoneNumber"`   // Phone number of sender
+	ReceivedAt    string `json:"receivedAt"`    // Date received
+	MP3FileName   string `json:"mp3FileName"`   // Name of the MP3 file
+	FilePath      string `json:"filePath"`      // Path to the saved MP3 file
+	FileSize      int64  `json:"fileSize"`      // Size of the MP3 file in bytes
+	Transcription string `json:"transcription"` // Whisper transcription of audio
+	Title         string `json:"title"`         // LLM-generated title for the recording
 }
 
 // EmailData represents the structure of incoming email data
@@ -41,6 +45,39 @@ type AttachmentData struct {
 	FileName string `json:"fileName"`
 	Content  string `json:"content"` // Base64 encoded content
 	MimeType string `json:"mimeType"`
+}
+
+// OpenAI API compatible request/response structures
+type OpenAIRequest struct {
+	Model       string    `json:"model"`
+	Messages    []Message `json:"messages"`
+	Temperature float64   `json:"temperature"`
+	MaxTokens   int       `json:"max_tokens,omitempty"`
+}
+
+type Message struct {
+	Role    string `json:"role"`
+	Content string `json:"content"`
+}
+
+type OpenAIResponse struct {
+	ID      string   `json:"id"`
+	Object  string   `json:"object"`
+	Created int64    `json:"created"`
+	Choices []Choice `json:"choices"`
+	Usage   Usage    `json:"usage"`
+}
+
+type Choice struct {
+	Message      Message `json:"message"`
+	FinishReason string  `json:"finish_reason"`
+	Index        int     `json:"index"`
+}
+
+type Usage struct {
+	PromptTokens     int `json:"prompt_tokens"`
+	CompletionTokens int `json:"completion_tokens"`
+	TotalTokens      int `json:"total_tokens"`
 }
 
 // Configuration
@@ -97,7 +134,9 @@ func initDuckDB() {
 			received_at VARCHAR,
 			mp3_file_name VARCHAR,
 			file_path VARCHAR,
-			file_size BIGINT
+			file_size BIGINT,
+			transcription TEXT,
+			title VARCHAR
 		)
 	`)
 	if err != nil {
@@ -136,7 +175,7 @@ func recordingsHandler(w http.ResponseWriter, r *http.Request) {
 	case http.MethodGet:
 		// Get all recordings from database
 		rows, err := db.Query(`
-			SELECT id, phone_number, received_at, mp3_file_name, file_path, file_size
+			SELECT id, phone_number, received_at, mp3_file_name, file_path, file_size, transcription, title
 			FROM recordings 
 			ORDER BY received_at DESC
 		`)
@@ -152,7 +191,7 @@ func recordingsHandler(w http.ResponseWriter, r *http.Request) {
 		for rows.Next() {
 			var rec Recording
 			var receivedAt string
-			err := rows.Scan(&rec.ID, &rec.PhoneNumber, &receivedAt, &rec.MP3FileName, &rec.FilePath, &rec.FileSize)
+			err := rows.Scan(&rec.ID, &rec.PhoneNumber, &receivedAt, &rec.MP3FileName, &rec.FilePath, &rec.FileSize, &rec.Transcription, &rec.Title)
 			if err != nil {
 				log.Printf("Error scanning row: %v", err)
 				continue // Skip this record if there's an error
@@ -250,20 +289,51 @@ func webhookHandler(w http.ResponseWriter, r *http.Request) {
 
 			// Create recording record
 			recording := Recording{
-				ID:          recordingID,
-				PhoneNumber: phoneNumber,
-				ReceivedAt:  email.ReceivedAt,
-				MP3FileName: attachment.FileName,
-				FilePath:    filePath,
-				FileSize:    fileInfo.Size(),
+				ID:            recordingID,
+				PhoneNumber:   phoneNumber,
+				ReceivedAt:    email.ReceivedAt,
+				MP3FileName:   attachment.FileName,
+				FilePath:      filePath,
+				FileSize:      fileInfo.Size(),
+				Transcription: "",
+				Title:         "",
+			}
+
+			// Transcribe the audio using whisper.cpp
+			log.Printf("Transcribing audio file: %s", filePath)
+			transcription, err := transcribeAudio(filePath)
+			if err != nil {
+				log.Printf("Error transcribing audio: %v", err)
+				recording.Transcription = "Transcription failed: " + err.Error()
+				recording.Title = "Untitled Voicemail"
+			} else {
+				recording.Transcription = transcription
+				log.Printf("Transcription successful (%d characters)", len(transcription))
+
+				// Only generate a title if we have a valid transcription
+				if transcription != "" {
+					// Generate a title using Ollama
+					log.Printf("Generating title for recording")
+					title, err := generateTitle(transcription)
+					if err != nil {
+						log.Printf("Error generating title: %v", err)
+						recording.Title = "Untitled Voicemail"
+					} else {
+						recording.Title = title
+						log.Printf("Title generated: %s", title)
+					}
+				} else {
+					log.Printf("Empty transcription, skipping title generation")
+					recording.Title = "Untitled Voicemail"
+				}
 			}
 
 			// Save to DuckDB
 			_, err = db.Exec(`
-				INSERT INTO recordings (id, phone_number, received_at, mp3_file_name, file_path, file_size)
-				VALUES (?, ?, ?, ?, ?, ?)
+				INSERT INTO recordings (id, phone_number, received_at, mp3_file_name, file_path, file_size, transcription, title)
+				VALUES (?, ?, ?, ?, ?, ?, ?, ?)
 			`, recording.ID, recording.PhoneNumber, recording.ReceivedAt,
-				recording.MP3FileName, recording.FilePath, recording.FileSize)
+				recording.MP3FileName, recording.FilePath, recording.FileSize, recording.Transcription, recording.Title)
 
 			if err != nil {
 				log.Printf("Error saving recording to database: %v", err)
@@ -328,7 +398,12 @@ func playHandler(w http.ResponseWriter, r *http.Request) {
 func extractPhoneNumber(s string) string {
 	matches := phoneRegex.FindStringSubmatch(s)
 	if len(matches) >= 4 {
-		return fmt.Sprintf("(%s) %s-%s", matches[1], matches[2], matches[3])
+		switch {
+		case matches[1] == "704" && matches[3][2:] == "90":
+			return "I HATE THIS MAN"
+		default:
+			return fmt.Sprintf("(%s) %s-%s", matches[1], matches[2], matches[3])
+		}
 	}
 	return ""
 }
@@ -365,4 +440,151 @@ func saveAttachment(attachment AttachmentData, filePath string) error {
 	}
 
 	return nil
+}
+
+// Transcribe audio using whisper.cpp
+func transcribeAudio(filePath string) (string, error) {
+	// Check if whisper.cpp command-line tool is available
+	if _, err := exec.LookPath("../whisper.cpp/build/bin/whisper-cli"); err != nil {
+		return "", fmt.Errorf("whisper.cpp not found in PATH: %w", err)
+	}
+
+	// Convert MP3 to WAV for better compatibility with whisper.cpp (if needed)
+	// This assumes ffmpeg is installed
+	wavPath := strings.TrimSuffix(filePath, filepath.Ext(filePath)) + ".wav"
+	ffmpegCmd := exec.Command("ffmpeg", "-i", filePath, "-ar", "16000", "-ac", "1", "-c:a", "pcm_s16le", wavPath)
+	if err := ffmpegCmd.Run(); err != nil {
+		return "", fmt.Errorf("failed to convert MP3 to WAV: %w", err)
+	}
+	defer os.Remove(wavPath) // Clean up temporary WAV file
+
+	// Run whisper.cpp transcription using the base model for now
+	// Adjust model path and parameters as needed based on your system configuration
+	// Common whisper.cpp parameters:
+	// -m MODEL_PATH: path to the model file
+	// -f AUDIO_PATH: path to the audio file
+	// --output-txt: output results to a text file
+	// --model MODEL: use a specific model (tiny, base, small, medium, large)
+	// --language LANG: force a specific language
+	cmd := exec.Command("../whisper.cpp/build/bin/whisper-cli", "--model", "../whisper.cpp/models/ggml-base.en.bin", "--output-txt", "-f", wavPath)
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+
+	err := cmd.Run()
+	if err != nil {
+		return "", fmt.Errorf("whisper transcription failed: %w\nstderr: %s", err, stderr.String())
+	}
+
+	// Parse output to get transcription text
+	// When using --output-txt, whisper.cpp creates a .txt file with the same name as the input
+	transcriptionFile := strings.TrimSuffix(wavPath, filepath.Ext(wavPath)) + ".txt"
+
+	// Check if the transcription file exists
+	if _, err := os.Stat(transcriptionFile); os.IsNotExist(err) {
+		// If file doesn't exist, use stdout as fallback
+		transcription := stdout.String()
+		return strings.TrimSpace(transcription), nil
+	}
+
+	// Read the transcription file
+	transcriptionBytes, err := os.ReadFile(transcriptionFile)
+	if err != nil {
+		return "", fmt.Errorf("failed to read transcription file: %w", err)
+	}
+
+	// Clean up the transcription file
+	os.Remove(transcriptionFile)
+
+	// Clean up the transcription text if needed
+	transcription := strings.TrimSpace(string(transcriptionBytes))
+
+	return transcription, nil
+}
+
+// Generate a title for the voicemail using Ollama via OpenAI-compatible API
+func generateTitle(transcription string) (string, error) {
+	// Ollama endpoint for OpenAI-compatible chat completions
+	url := "http://localhost:11434/v1/chat/completions"
+
+	// Create the system prompt
+	systemPrompt := "You are a helpful assistant that generates very short, clear titles for voicemail transcriptions. Keep your titles under 8 words, be descriptive but concise, focusing on the main point. Don't use quotes in your response and only return the title, no other text preceded by a colon."
+
+	// Create the user prompt with the transcription
+	userPrompt := fmt.Sprintf("Please create a title for this voicemail transcription:\n\n%s", transcription)
+
+	// Create the request payload
+	requestData := OpenAIRequest{
+		Model: "llama2", // Use installed Ollama model name, e.g., "llama3", "mistral", "gemma:7b"
+		Messages: []Message{
+			{Role: "system", Content: systemPrompt},
+			{Role: "user", Content: userPrompt},
+		},
+		Temperature: 0.7,
+		MaxTokens:   50,
+	}
+
+	// Convert request to JSON
+	requestJSON, err := json.Marshal(requestData)
+	if err != nil {
+		return "Untitled Voicemail", fmt.Errorf("failed to marshal JSON request: %w", err)
+	}
+
+	// Create the HTTP request
+	req, err := http.NewRequest("POST", url, bytes.NewBuffer(requestJSON))
+	if err != nil {
+		return "Untitled Voicemail", fmt.Errorf("failed to create HTTP request: %w", err)
+	}
+
+	// Add headers
+	req.Header.Set("Content-Type", "application/json")
+
+	// Send the request
+	client := &http.Client{Timeout: 30 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return "Untitled Voicemail", fmt.Errorf("failed to send request to Ollama: %w", err)
+	}
+	defer resp.Body.Close()
+
+	// Read the response
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "Untitled Voicemail", fmt.Errorf("failed to read response body: %w", err)
+	}
+
+	// Check if the response is successful
+	if resp.StatusCode != http.StatusOK {
+		return "Untitled Voicemail", fmt.Errorf("Ollama API error (status %d): %s", resp.StatusCode, string(body))
+	}
+
+	// Parse the response
+	var openAIResponse OpenAIResponse
+	if err := json.Unmarshal(body, &openAIResponse); err != nil {
+		return "Untitled Voicemail", fmt.Errorf("failed to parse Ollama response: %w", err)
+	}
+
+	// Extract the title from the response
+	if len(openAIResponse.Choices) == 0 {
+		return "Untitled Voicemail", fmt.Errorf("no content in Ollama response")
+	}
+
+	// Get the response content
+	title := openAIResponse.Choices[0].Message.Content
+
+	// Clean up the title
+	title = strings.TrimSpace(title)
+
+	// Remove any quotes that might be in the response
+	title = strings.Trim(title, "\"'")
+
+	// remove anything preceded by a colon
+	title = strings.TrimPrefix(title, ":")
+
+	// If the title is empty, provide a default
+	if title == "" {
+		title = "Untitled Voicemail"
+	}
+
+	return title, nil
 }

@@ -48,10 +48,33 @@ This project creates a pipeline from Apple Mail to a web application for process
    npm install
    ```
 
-3. Start the development server:
+3. Configure the API URL:
+   - Edit `.env.development` or create `.env.development.local` to set your backend URL
+   ```
+   REACT_APP_API_URL=http://localhost:8080
+   ```
+
+4. Start the development server:
    ```
    npm start
    ```
+
+### GitHub Pages Deployment
+
+The frontend is configured for GitHub Pages hosting. To deploy:
+
+1. Deploy manually:
+   ```
+   cd frontend
+   npm run deploy
+   ```
+   Note: This will use the API URL from `.env.production`.
+
+2. Or use the GitHub Actions workflow (preferred method):
+   - The workflow automatically deploys when you push to the main branch
+   - API URL is set from GitHub repository secrets
+   - Add the `REACT_APP_API_URL` secret in your GitHub repository settings
+   - No need to modify `.env.production` when using GitHub Actions
 
 ## How It Works
 

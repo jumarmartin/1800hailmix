@@ -21,7 +21,7 @@ on processNewEmails()
 		
 		repeat with currentMessage in inboxMessages
 			-- Only process up to maxEmails
-			if processedCount ³ maxEmails then
+			if processedCount ï¿½ maxEmails then
 				exit repeat
 			end if
 			
