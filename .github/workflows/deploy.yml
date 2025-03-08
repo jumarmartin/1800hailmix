@@ -26,7 +26,9 @@ jobs:
           cache-dependency-path: frontend/package-lock.json
 
       - name: Install dependencies
-        run: cd frontend && npm ci
+        run: |
+          git submodule update --init --recursive
+          cd frontend && npm ci
 
       - name: Build
         run: cd frontend && npm run build
