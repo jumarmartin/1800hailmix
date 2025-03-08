@@ -6,7 +6,6 @@ on:
       - main
     paths:
       - 'frontend/**'
-  workflow_dispatch:
 
 permissions:
   contents: write
