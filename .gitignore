@@ -1,0 +1,41 @@
+# Whisper.cpp directory
+/whisper.cpp/
+
+# Backend files
+/backend/data/mp3s/*.mp3
+/backend/data/mp3s/*.wav
+/backend/data/mp3s/*.txt
+/backend/data/*.duckdb
+/backend/data/*.duckdb.wal
+
+# Frontend dependencies
+/frontend/node_modules
+/frontend/.pnp
+/frontend/.pnp.js
+
+# Frontend testing
+/frontend/coverage
+
+# Frontend production build
+/frontend/build
+
+# Frontend misc
+/frontend/.DS_Store
+/frontend/.env.local
+/frontend/.env.development.local
+/frontend/.env.test.local
+/frontend/.env.production.local
+/frontend/npm-debug.log*
+/frontend/yarn-debug.log*
+/frontend/yarn-error.log*
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Editor directories and files
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
