@@ -40,3 +40,5 @@ jobs:
         uses: JamesIves/github-pages-deploy-action@v4
         with:
           folder: frontend/build
+        env:
+          REACT_APP_API_URL: ${{ secrets.REACT_APP_API_URL }}
